@@ -87,11 +87,29 @@
                 <div id="budget-list" class="budget-list">
                     <p class="empty-state">No monthly limits yet.</p>
                 </div>
-                <div class="data-actions">
-                    <button id="export-btn" class="btn-small">Export data (JSON)</button>
-                    <label class="btn-small" for="import-input" role="button" tabindex="0">Import data</label>
-                    <input type="file" id="import-input" accept="application/json" hidden>
+            </section>
+
+            <section class="card backup-card">
+                <h2>Backup &amp; Restore</h2>
+                <p class="card-hint">Everything runs in your browser — exports download as files, nothing is sent to any server.</p>
+                <div class="backup-row">
+                    <button id="export-btn" class="btn-small">Export JSON</button>
+                    <button id="export-csv-btn" class="btn-small">Export CSV</button>
+                    <label class="btn-small" for="import-input" role="button" tabindex="0">Import JSON…</label>
+                    <input type="file" id="import-input" accept="application/json,.json" hidden>
                 </div>
+                <div id="import-pending" class="import-panel" hidden>
+                    <p id="import-summary" class="card-hint"></p>
+                    <div class="radio-row" role="radiogroup" aria-label="Import mode">
+                        <label><input type="radio" name="import-mode" value="merge" checked> Merge (skip exact duplicates)</label>
+                        <label><input type="radio" name="import-mode" value="replace"> Replace all existing data</label>
+                    </div>
+                    <div class="backup-row">
+                        <button id="import-confirm" class="btn-small">Confirm import</button>
+                        <button id="import-cancel" class="btn-small btn-danger-ghost">Cancel</button>
+                    </div>
+                </div>
+                <p id="import-status" class="status-line" role="status"></p>
             </section>
 
             <section class="card list-card">

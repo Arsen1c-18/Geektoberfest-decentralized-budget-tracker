@@ -123,7 +123,157 @@ const budgetSubmitBtn = document.getElementById("budget-submit");
 const budgetCancelBtn = document.getElementById("budget-cancel");
 const categoryOptionsEl = document.getElementById("category-options");
 const exportBtn = document.getElementById("export-btn");
+const exportCsvBtn = document.getElementById("export-csv-btn");
 const importInput = document.getElementById("import-input");
+const importPendingEl = document.getElementById("import-pending");
+const importSummaryEl = document.getElementById("import-summary");
+const importConfirmBtn = document.getElementById("import-confirm");
+const importCancelBtn = document.getElementById("import-cancel");
+const importStatusEl = document.getElementById("import-status");
+
+let pendingImport = null;
+
+function downloadFile(content, filename, mimeType) {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+}
+
+/** Read a File with FileReader (vanilla JS, no new libraries). */
+function readFileText(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onerror = () => reject(new Error("Could not read that file."));
+        reader.onload = () => resolve(reader.result);
+        reader.readAsText(file);
+    });
+}
+
+/**
+ * Replace ALL local data atomically: one transaction across both stores,
+ * so a failure aborts everything instead of leaving a half-written state.
+ */
+function replaceAllData(transactions, budgets) {
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction([STORE_NAME, BUDGET_STORE], "readwrite");
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error || new Error("Import was aborted."));
+        const txStore = transaction.objectStore(STORE_NAME);
+        const budgetStore = transaction.objectStore(BUDGET_STORE);
+        txStore.clear();
+        budgetStore.clear();
+        const now = new Date().toISOString();
+        transactions.forEach((tx) => txStore.add(tx));
+        budgets.forEach((b) => budgetStore.put({
+            key: normalizeKey(b.category),
+            display: b.category,
+            limit: b.limit,
+            updatedAt: now,
+        }));
+    });
+}
+
+if (exportBtn) {
+    exportBtn.addEventListener("click", async () => {
+        const [txs, budgets] = await Promise.all([getTransactions(), getBudgets()]);
+        const payload = BL.buildExportPayload(txs, budgets);
+        downloadFile(JSON.stringify(payload, null, 2), "budget-tracker-export.json", "application/json");
+    });
+}
+
+if (exportCsvBtn) {
+    exportCsvBtn.addEventListener("click", async () => {
+        const txs = await getTransactions();
+        downloadFile(BL.buildCsv(txs), "budget-tracker-export.csv", "text/csv");
+    });
+}
+
+function clearPendingImport() {
+    pendingImport = null;
+    importInput.value = "";
+    if (importPendingEl) importPendingEl.hidden = true;
+    if (importStatusEl) importStatusEl.textContent = "";
+}
+
+if (importInput) {
+    importInput.addEventListener("change", async () => {
+        const file = importInput.files && importInput.files[0];
+        if (!file) return;
+        if (importStatusEl) importStatusEl.textContent = "";
+        let parsed;
+        try {
+            parsed = JSON.parse(await readFileText(file));
+        } catch (err) {
+            console.error("Import read error:", err);
+            showBudgetAlert("Import failed: that file is not valid JSON and none of your data was changed.");
+            importInput.value = "";
+            return;
+        }
+        // Validate EVERYTHING before touching IndexedDB: corrupt files
+        // are rejected here, leaving existing data untouched.
+        let validated;
+        try {
+            validated = BL.validateImportPayload(parsed);
+        } catch (err) {
+            console.error("Import validation error:", err);
+            showBudgetAlert(`Import failed: ${err.message} None of your data was changed.`);
+            importInput.value = "";
+            return;
+        }
+        pendingImport = validated;
+        if (importSummaryEl) {
+            importSummaryEl.textContent = `File looks good: ${validated.transactions.length} transaction(s), ${validated.budgets.length} budget(s). Choose merge or replace, then confirm.`;
+        }
+        if (importPendingEl) importPendingEl.hidden = false;
+    });
+}
+
+if (importCancelBtn) {
+    importCancelBtn.addEventListener("click", clearPendingImport);
+}
+
+if (importConfirmBtn) {
+    importConfirmBtn.addEventListener("click", async () => {
+        if (!pendingImport) return;
+        const mode = (document.querySelector('input[name="import-mode"]:checked') || {}).value || "merge";
+        importConfirmBtn.disabled = true;
+        try {
+            if (mode === "replace") {
+                await replaceAllData(pendingImport.transactions, pendingImport.budgets);
+                if (importStatusEl) {
+                    importStatusEl.textContent = `Replaced all data with ${pendingImport.transactions.length} transaction(s) and ${pendingImport.budgets.length} budget(s).`;
+                }
+            } else {
+                const existing = await getTransactions();
+                const fresh = BL.dedupeNewTransactions(existing, pendingImport.transactions);
+                for (const tx of fresh) {
+                    await addTransaction(tx);
+                }
+                for (const b of pendingImport.budgets) {
+                    await setBudget(b.category, b.limit);
+                }
+                const skipped = pendingImport.transactions.length - fresh.length;
+                if (importStatusEl) {
+                    importStatusEl.textContent = `Merged: ${fresh.length} imported, ${skipped} exact duplicate(s) skipped, ${pendingImport.budgets.length} budget(s) applied.`;
+                }
+            }
+            clearPendingImport();
+            await loadData();
+        } catch (err) {
+            console.error("Import apply error:", err);
+            showBudgetAlert("Import failed while saving. Your existing data was left unchanged.");
+        } finally {
+            importConfirmBtn.disabled = false;
+        }
+    });
+}
 
 let classifyTimeout = null;
 let editingBudgetKey = null;
@@ -260,60 +410,6 @@ document.addEventListener("click", async (e) => {
         budgetCategoryInput.focus();
     }
 });
-
-if (exportBtn) {
-    exportBtn.addEventListener("click", async () => {
-        const [txs, budgets] = await Promise.all([getTransactions(), getBudgets()]);
-        const payload = BL.buildExportPayload(txs, budgets);
-        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = "budget-tracker-export.json";
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-    });
-}
-
-if (importInput) {
-    importInput.addEventListener("change", async () => {
-        const file = importInput.files && importInput.files[0];
-        if (!file) return;
-        try {
-            const text = await file.text();
-            const data = JSON.parse(text);
-            if (Array.isArray(data.transactions)) {
-                for (const tx of data.transactions) {
-                    const amount = Number(tx.amount);
-                    if (!tx.description || !Number.isFinite(amount)) continue;
-                    await addTransaction({
-                        description: String(tx.description),
-                        amount,
-                        category: tx.category ? String(tx.category) : "General",
-                        date: tx.date || new Date().toISOString(),
-                    });
-                }
-            }
-            if (Array.isArray(data.budgets)) {
-                for (const b of data.budgets) {
-                    try {
-                        await setBudget(b.category, b.limit);
-                    } catch (err) {
-                        console.warn("Skipping invalid budget entry:", b);
-                    }
-                }
-            }
-            await loadData();
-        } catch (err) {
-            console.error("Import error:", err);
-            showBudgetAlert("Import failed: that file is not a valid budget-tracker export.");
-        } finally {
-            importInput.value = "";
-        }
-    });
-}
 
 async function removeTx(id) {
     await deleteTransaction(id);

@@ -70,4 +70,66 @@ describe("buildExportPayload", () => {
         assert.equal(payload.transactions.length, 1);
         assert.deepEqual(payload.budgets, [{ category: "Food", limit: 200 }]);
     });
+    it("round-trips through validateImportPayload without data loss", () => {
+        const txs = [
+            { id: 1, description: "Lunch", amount: 12.5, category: "Food", date: "2026-10-01T10:00:00.000Z" },
+            { id: 2, description: "Refund", amount: -20, category: "General", date: "2026-10-02T10:00:00.000Z" },
+        ];
+        const budgets = [{ key: "food", display: "Food", limit: 200, updatedAt: "2026-10-01" }];
+        const payload = JSON.parse(JSON.stringify(BL.buildExportPayload(txs, budgets)));
+        const back = BL.validateImportPayload(payload);
+        assert.deepEqual(back.transactions, txs.map(({ description, amount, category, date }) => ({ description, amount, category, date })));
+        assert.deepEqual(back.budgets, [{ category: "Food", limit: 200 }]);
+    });
+});
+
+describe("buildCsv", () => {
+    it("has a header row with date, description, category, amount and type", () => {
+        const csv = BL.buildCsv([{ description: "Lunch", amount: 12.5, category: "Food", date: "2026-10-01" }]);
+        const lines = csv.split("\n");
+        assert.equal(lines[0], "date,description,category,amount,type");
+        assert.equal(lines[1], "2026-10-01,Lunch,Food,12.5,expense");
+    });
+    it("derives income type for negative amounts and escapes cells", () => {
+        const csv = BL.buildCsv([{ description: 'Refund, "big" one', amount: -20, category: "Misc", date: "2026-10-02" }]);
+        assert.ok(csv.includes('"Refund, ""big"" one"'));
+        assert.ok(csv.endsWith(",income"));
+    });
+});
+
+describe("validateImportPayload", () => {
+    it("accepts older exports without a budgets array", () => {
+        const back = BL.validateImportPayload({ transactions: [{ description: "Lunch", amount: 5 }] });
+        assert.equal(back.transactions.length, 1);
+        assert.deepEqual(back.budgets, []);
+        assert.equal(back.transactions[0].category, "General");
+    });
+    it("rejects corrupt files with clear errors", () => {
+        assert.throws(() => BL.validateImportPayload(null), /JSON object/);
+        assert.throws(() => BL.validateImportPayload([]), /JSON object/);
+        assert.throws(() => BL.validateImportPayload({}), /transaction list/);
+        assert.throws(() => BL.validateImportPayload({ transactions: [{ amount: 5 }] }), /no description/);
+        assert.throws(() => BL.validateImportPayload({ transactions: [{ description: "X", amount: "abc" }] }), /invalid amount/);
+        assert.throws(() => BL.validateImportPayload({ transactions: [], budgets: [{ category: "Food", limit: -1 }] }), /invalid category or limit/);
+    });
+});
+
+describe("dedupeNewTransactions", () => {
+    const existing = [{ description: "Lunch", amount: 12.5, category: "Food", date: "2026-10-01T10:00:00.000Z" }];
+    it("skips exact duplicates even with different date formatting or casing", () => {
+        const incoming = [
+            { description: "Lunch", amount: 12.5, category: "FOOD", date: "2026-10-01T10:00:00.000Z" },
+            { description: "Lunch", amount: 12.5, category: "Food", date: "2026-10-01T10:00:00Z" },
+        ];
+        assert.deepEqual(BL.dedupeNewTransactions(existing, incoming), []);
+    });
+    it("keeps near-matches and dedupes within the incoming batch", () => {
+        const incoming = [
+            { description: "Lunch", amount: 13, category: "Food", date: "2026-10-01T10:00:00.000Z" },
+            { description: "Dinner", amount: 30, category: "Food", date: "2026-10-01T10:00:00.000Z" },
+            { description: "Dinner", amount: 30, category: "Food", date: "2026-10-01T10:00:00.000Z" },
+        ];
+        const fresh = BL.dedupeNewTransactions(existing, incoming);
+        assert.equal(fresh.length, 2);
+    });
 });

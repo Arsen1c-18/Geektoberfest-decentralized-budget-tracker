@@ -105,6 +105,113 @@
         };
     }
 
+    /** Derive the CSV "type" column: negative amounts count as income. */
+    function deriveType(tx) {
+        return Number(tx && tx.amount) < 0 ? "income" : "expense";
+    }
+
+    /** Escape one CSV cell (quotes, commas, newlines). */
+    function csvEscape(value) {
+        const s = String(value === null || value === undefined ? "" : value);
+        if (/[",\n\r]/.test(s)) {
+            return `"${s.replace(/"/g, '""')}"`;
+        }
+        return s;
+    }
+
+    /**
+     * Build spreadsheet CSV: header date,description,category,amount,type.
+     * Transactions carry no type field, so it is derived from the amount.
+     */
+    function buildCsv(transactions) {
+        const header = "date,description,category,amount,type";
+        const rows = (transactions || []).map((tx) => [
+            csvEscape(tx.date || ""),
+            csvEscape(tx.description || ""),
+            csvEscape(tx.category || "General"),
+            csvEscape(tx.amount),
+            csvEscape(deriveType(tx)),
+        ].join(","));
+        return [header, ...rows].join("\n");
+    }
+
+    /**
+     * Validate an imported payload WITHOUT touching storage, so corrupt
+     * files can be rejected before any write happens. Returns sanitized
+     * { transactions, budgets } or throws an Error with a user-facing message.
+     * Accepts our own export shape; budgets are optional (older exports).
+     */
+    function validateImportPayload(data) {
+        if (!data || typeof data !== "object" || Array.isArray(data)) {
+            throw new Error("Not a budget-tracker backup: expected a JSON object.");
+        }
+        if (!Array.isArray(data.transactions)) {
+            throw new Error("Not a budget-tracker backup: missing transaction list.");
+        }
+        const transactions = data.transactions.map((tx, i) => {
+            if (!tx || typeof tx !== "object") {
+                throw new Error(`Transaction #${i + 1} is malformed.`);
+            }
+            const description = String(tx.description || "").trim();
+            const amount = Number(tx.amount);
+            if (!description) {
+                throw new Error(`Transaction #${i + 1} has no description.`);
+            }
+            if (!Number.isFinite(amount)) {
+                throw new Error(`Transaction "${description}" has an invalid amount.`);
+            }
+            let date = tx.date ? new Date(tx.date) : new Date();
+            if (Number.isNaN(date.getTime())) date = new Date();
+            return {
+                description,
+                amount,
+                category: tx.category ? String(tx.category) : "General",
+                date: date.toISOString(),
+            };
+        });
+        const budgets = [];
+        if (data.budgets !== undefined) {
+            if (!Array.isArray(data.budgets)) {
+                throw new Error("Budget list is malformed.");
+            }
+            data.budgets.forEach((b, i) => {
+                const limit = validateBudgetLimit(b && b.limit);
+                const category = b && b.category ? String(b.category).trim() : "";
+                if (!category || limit === null) {
+                    throw new Error(`Budget #${i + 1} has an invalid category or limit.`);
+                }
+                budgets.push({ category, limit });
+            });
+        }
+        return { transactions, budgets };
+    }
+
+    /** Identity of a transaction for duplicate detection (IDs excluded). */
+    function dedupeKey(tx) {
+        const time = new Date(tx.date).getTime();
+        return JSON.stringify([
+            Number.isNaN(time) ? tx.date : time,
+            String(tx.description).trim(),
+            normalizeCategoryKey(tx.category || "General"),
+            Number(tx.amount),
+        ]);
+    }
+
+    /**
+     * Filter incoming transactions down to those not already present.
+     * Exact duplicates (same date, description, category, amount) are
+     * skipped; comparison ignores auto-generated IDs and date formatting.
+     */
+    function dedupeNewTransactions(existing, incoming) {
+        const seen = new Set((existing || []).map(dedupeKey));
+        return (incoming || []).filter((tx) => {
+            const key = dedupeKey(tx);
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+    }
+
     return {
         WARN_RATIO,
         normalizeCategoryKey,
@@ -114,5 +221,10 @@
         isDateInMonth,
         sumSpentForCategory,
         buildExportPayload,
+        deriveType,
+        csvEscape,
+        buildCsv,
+        validateImportPayload,
+        dedupeNewTransactions,
     };
 });
